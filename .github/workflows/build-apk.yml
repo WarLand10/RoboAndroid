@@ -1,52 +1,50 @@
-```yaml
 name: Build Robo APK
 
 on:
-  workflow_dispatch:
-  push:
-    paths:
-      - 'RoboAndroid/**'
-      - '.github/workflows/build-apk.yml'
+workflow_dispatch:
+push:
+paths:
+- 'RoboAndroid/**'
+- '.github/workflows/build-apk.yml'
 
 permissions:
-  contents: read
+contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+build:
+runs-on: ubuntu-latest
+steps:
+- name: Get project
+uses: actions/checkout@v4
 
-    steps:
-      - name: Get project
-        uses: actions/checkout@v4
+  - name: Install Java
+    uses: actions/setup-java@v5
+    with:
+      distribution: temurin
+      java-version: '17'
 
-      - name: Install Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
+  - name: Install Android SDK
+    uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+  - name: Install SDK packages
+    run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Install Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
+  - name: Install Gradle
+    uses: gradle/actions/setup-gradle@v4
+    with:
+      gradle-version: '8.11.1'
 
-      - name: Check project
-        run: |
-          test -f RoboAndroid/settings.gradle.kts
-          test -f RoboAndroid/app/build.gradle.kts
+  - name: Check project
+    run: |
+      test -f RoboAndroid/settings.gradle.kts
+      test -f RoboAndroid/app/build.gradle.kts
 
-      - name: Build APK
-        run: gradle -p RoboAndroid assembleDebug
+  - name: Build APK
+    run: gradle -p RoboAndroid assembleDebug
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: RoboAndroid-debug-APK
-          path: RoboAndroid/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-```
+  - name: Upload APK
+    uses: actions/upload-artifact@v4
+    with:
+      name: RoboAndroid-debug-APK
+      path: RoboAndroid/app/build/outputs/apk/debug/*.apk
+      if-no-files-found: error
