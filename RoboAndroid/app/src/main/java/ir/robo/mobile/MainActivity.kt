@@ -181,7 +181,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         setStatus("در حال دریافت پاسخ Gemini…")
         worker.execute {
             try {
-                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent")
+                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent")
                 val conn=url.openConnection() as HttpURLConnection
                 conn.requestMethod="POST"; conn.connectTimeout=15000; conn.readTimeout=30000; conn.doOutput=true; conn.setRequestProperty("Content-Type","application/json; charset=utf-8"); conn.setRequestProperty("x-goog-api-key", key)
                 val prompt = "تو دستیار صوتی فارسی رُوبُو هستی. کوتاه، دوستانه و فارسی جواب بده. سازنده تو امیرعلی باقری است. برای فرمان حرکتی فقط به کاربر توضیح بده؛ حرکت موتورها فقط از فرمان‌های محلی برنامه انجام می‌شود.\nکاربر: $userText"
