@@ -32,11 +32,10 @@ class RoboLiveClient(
 
     fun connect() {
         onStatus("در حال اتصال به Gemini Live…")
-        val key = URLEncoder.encode(apiKey, "UTF-8")
-        val req = Request.Builder()
-    .url("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent")
-    .addHeader("x-goog-api-key", apiKey)
-    .build()
+    val key = URLEncoder.encode(apiKey, "UTF-8")
+    val req = Request.Builder()
+       .url("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$key")
+       .build()
         socket = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 val setupBody = JSONObject()
