@@ -8,6 +8,9 @@ import android.content.pm.PackageManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
@@ -33,6 +36,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private val usbPermission = "ir.robo.mobile.USB_PERMISSION"
     private lateinit var usbManager: UsbManager
     private var serialPort: UsbSerialPort? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+private var serialReadyAtMs = 0L
     private var tts: TextToSpeech? = null
     private var speech: SpeechRecognizer? = null
     private val worker = Executors.newSingleThreadExecutor()
@@ -117,14 +122,59 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun openDevice(device: UsbDevice) {
+    private fun openDevice(device: UsbDevice) {
+    try {
+        serialPort?.let {
+            try {
+                it.close()
+            } catch (_: Exception) {
+            }
+        }
+        serialPort = null
+        serialReadyAtMs = 0L
+
+        val driver =
+            UsbSerialProber.getDefaultProber()
+                .probeDevice(device)
+                ?: error("درایور USB شناخته نشد")
+
+        val connection =
+            usbManager.openDevice(device)
+                ?: error("USB باز نشد")
+
+        val port = driver.ports[0]
+
+        port.open(connection)
+        port.setParameters(
+            9600,
+            8,
+            UsbSerialPort.STOPBITS_1,
+            UsbSerialPort.PARITY_NONE
+        )
+
         try {
-            val driver = UsbSerialProber.getDefaultProber().probeDevice(device) ?: error("درایور USB شناخته نشد")
-            val connection = usbManager.openDevice(device) ?: error("USB باز نشد")
-            val port = driver.ports[0]
-            port.open(connection); port.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            serialPort?.close(); serialPort = port
-            setStatus("Arduino متصل شد (9600 baud)"); sayLog("ارتباط سریال برقرار شد.")
-        } catch (e: Exception) { setStatus("خطای USB: ${e.message}") }
+            port.setDTR(true)
+        } catch (_: Exception) {
+        }
+
+        serialPort = port
+        serialReadyAtMs =
+            SystemClock.elapsedRealtime() + 2000L
+
+        setStatus("USB وصل شد؛ آردوینو در حال آماده‌شدن است")
+
+        mainHandler.postDelayed({
+            if (serialPort === port) {
+                serialReadyAtMs = 0L
+                setStatus("Arduino آماده است (9600 baud)")
+                sayLog("آردوینو آماده دریافت فرمان است.")
+            }
+        }, 2000L)
+
+    } catch (e: Exception) {
+        serialReadyAtMs = 0L
+        setStatus("خطای USB: ${e.message}")
+    }
     }
 
     private fun sendMove(command: String): Boolean {
