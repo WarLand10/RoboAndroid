@@ -122,7 +122,6 @@ private var serialReadyAtMs = 0L
     }
 
     private fun openDevice(device: UsbDevice) {
-    private fun openDevice(device: UsbDevice) {
     try {
         serialPort?.let {
             try {
@@ -177,16 +176,51 @@ private var serialReadyAtMs = 0L
     }
     }
 
-    private fun sendMove(command: String): Boolean {
-        if(command == "STOP") movementStopTask?.cancel(false)
-        return try {
-            val port = serialPort ?: run { setStatus("اول Arduino را وصل کن"); return false }
-            val bytes = "$command\n".toByteArray(Charsets.UTF_8)
-            port.write(bytes, 700)
-            sayLog("فرمان حرکتی: $command")
-            true
-        } catch (e: Exception) { setStatus("ارسال فرمان ناموفق: ${e.message}"); false }
+private fun sendMove(command: String): Boolean {
+    val cmd = command.trim().uppercase(Locale.ROOT)
+
+    if (cmd == "STOP") {
+        movementStopTask?.cancel(false)
     }
+
+    val port = serialPort ?: run {
+        setStatus("اول Arduino را وصل کن")
+        return false
+    }
+
+    val waitMs =
+        serialReadyAtMs - SystemClock.elapsedRealtime()
+
+    if (waitMs > 0) {
+        setStatus("آردوینو هنوز آماده نیست؛ کمی صبر کن")
+        return false
+    }
+
+    if (cmd !in setOf(
+            "FORWARD",
+            "BACKWARD",
+            "LEFT",
+            "RIGHT",
+            "STOP"
+        )
+    ) {
+        setStatus("فرمان حرکتی نامعتبر است")
+        return false
+    }
+
+    return try {
+        val bytes =
+            "$cmd\r\n".toByteArray(Charsets.US_ASCII)
+
+        port.write(bytes, 1000)
+
+        sayLog("فرمان به پورت USB نوشته شد: $cmd")
+        true
+    } catch (e: Exception) {
+        setStatus("ارسال فرمان ناموفق: ${e.message}")
+        false
+    }
+}
 
     private fun listen() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) { setStatus("تشخیص گفتار روی این گوشی در دسترس نیست؛ از کادر نوشتن استفاده کن"); return }
