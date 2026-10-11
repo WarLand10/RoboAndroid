@@ -40,7 +40,7 @@ class RoboLiveClient(
         socket = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 val setupBody = JSONObject()
-                    .put("model", "models/gemini-2.5-flash-native-audio-preview-12-2025")
+                    .put("model", "models/gemini-3.8-live")
                     .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO")))
                     .put("inputAudioTranscription", JSONObject())
                     .put("outputAudioTranscription", JSONObject())
