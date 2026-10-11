@@ -40,7 +40,7 @@ class RoboLiveClient(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 val setupBody = JSONObject()
                     .put("model", "models/gemini-3.8-live")
-                    .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO")))
+                    .put("responseModalities", JSONArray().put("AUDIO"))
                     .put("inputAudioTranscription", JSONObject())
                     .put("outputAudioTranscription", JSONObject())
                     .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", "تو رُوبُو هستی؛ دستیار صوتی فارسی سازنده‌ات امیرعلی باقری است. دوستانه و فارسی پاسخ بده. برای حرکت واقعی فقط از ابزار move_robot استفاده کن، حرکت حداکثر ۵ ثانیه باشد و توقف را با stop_robot اجرا کن. برای فایل‌ها فقط از ابزارهای پروژه استفاده کن؛ هر تغییر یا حذف فایل باید با تأیید کاربر انجام شود."))))
