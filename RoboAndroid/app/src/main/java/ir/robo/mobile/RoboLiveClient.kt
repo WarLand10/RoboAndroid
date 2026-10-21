@@ -1,145 +1,287 @@
 package ir.robo.mobile
 
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
-import android.media.AudioManager
 import android.util.Base64
-import okhttp3.*
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Gemini Live raw WebSocket client. Audio: 16 kHz PCM input, 24 kHz PCM output. */
+/** Gemini Live WebSocket client. Mic input: PCM 16 kHz, output: PCM 24 kHz. */
 class RoboLiveClient(
     private val apiKey: String,
     private val onStatus: (String) -> Unit,
     private val onText: (String) -> Unit,
     private val onToolCall: (id: String, name: String, args: JSONObject) -> Unit
 ) {
-    private val client = OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build()
-    private var socket: WebSocket? = null
-    private val connected = AtomicBoolean(false)
-    private val running = AtomicBoolean(false)
-    private var recorder: AudioRecord? = null
-    private var recordThread: Thread? = null
-    private var player: AudioTrack? = null
+    companion object {
+        private const val MODEL = "models/gemini-3.8-live"
+        private const val INPUT_RATE = 16000
+        private const val OUTPUT_RATE = 24000
+    }
 
-    fun isConnected() = connected.get()
+    private val client = OkHttpClient.Builder()
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .build()
+    private val connected = AtomicBoolean(false)
+    private val audioRunning = AtomicBoolean(false)
+    private val playbackQueue = LinkedBlockingQueue<ByteArray>()
+    @Volatile private var socket: WebSocket? = null
+    @Volatile private var recorder: AudioRecord? = null
+    @Volatile private var player: AudioTrack? = null
+    @Volatile private var recordThread: Thread? = null
+    @Volatile private var playbackThread: Thread? = null
+
+    fun isConnected(): Boolean = connected.get()
 
     fun connect() {
         onStatus("در حال اتصال به Gemini Live…")
-    val key = URLEncoder.encode(apiKey, "UTF-8")
-    val req = Request.Builder()
-       .url("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$key")
-       .build()
-        socket = client.newWebSocket(req, object : WebSocketListener() {
+        val encodedKey = URLEncoder.encode(apiKey, "UTF-8")
+        val request = Request.Builder()
+            .url("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$encodedKey")
+            .build()
+
+        socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                val setupBody = JSONObject()
-                    .put("model", "models/gemini-3.8-live")
+                val setupConfig = JSONObject()
+                    .put("model", MODEL)
                     .put("responseModalities", JSONArray().put("AUDIO"))
                     .put("inputAudioTranscription", JSONObject())
                     .put("outputAudioTranscription", JSONObject())
-                    .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", "تو رُوبُو هستی؛ دستیار صوتی فارسی سازنده‌ات امیرعلی باقری است. دوستانه و فارسی پاسخ بده. برای حرکت واقعی فقط از ابزار move_robot استفاده کن، حرکت حداکثر ۵ ثانیه باشد و توقف را با stop_robot اجرا کن. برای فایل‌ها فقط از ابزارهای پروژه استفاده کن؛ هر تغییر یا حذف فایل باید با تأیید کاربر انجام شود."))))
+                    .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put(
+                        "text",
+                        "تو رُوبُو هستی؛ دستیار صوتی فارسی و صمیمی. همیشه طبیعی و کوتاه به فارسی پاسخ بده و برای پاسخ‌ها از صدای مکالمه استفاده کن. " +
+                            "اگر کاربر پرسید سازنده‌ات کیست، با گفتار بگو: سازنده من امیرعلی باقریه. نام سازنده را بی‌دلیل مطرح نکن. " +
+                            "برای حرکت واقعی ربات فقط ابزار move_robot را با درخواست روشن کاربر استفاده کن؛ مدت حرکت را حداکثر ۵ ثانیه بگذار. " +
+                            "اگر کاربر گفت وایستا، بایست یا توقف، ابزار stop_robot را فوراً اجرا کن. " +
+                            "اگر برد وصل نیست، ادعا نکن که ربات حرکت کرده است."
+                    ))))
                     .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", toolDeclarations())))
-                val setup = JSONObject().put("setup", setupBody)
-                webSocket.send(setup.toString())
-                onStatus("اتصال Live برقرار شد؛ منتظر آماده‌شدن جلسه…")
+                webSocket.send(JSONObject().put("setup", setupConfig).toString())
+                onStatus("ارتباط شبکه برقرار شد؛ جلسهٔ صوتی در حال آماده‌شدن است")
             }
+
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
-                    val root=JSONObject(text)
-                    if(root.has("setupComplete")) { connected.set(true); startAudio(); onStatus("Gemini Live فعال است؛ صحبت کن") }
-                    if(root.has("error")) onStatus("خطای Gemini Live: ${root.optJSONObject("error")?.optString("message") ?: "خطای ناشناخته"}")
-                    val call=root.optJSONObject("toolCall")
-                    val calls=call?.optJSONArray("functionCalls")
-                    if(calls!=null) for(i in 0 until calls.length()) {
-                        val fc=calls.optJSONObject(i) ?: continue
-                        onToolCall(fc.optString("id"), fc.optString("name"), fc.optJSONObject("args") ?: JSONObject())
+                    val root = JSONObject(text)
+                    if (root.has("setupComplete")) {
+                        connected.set(true)
+                        startAudio()
+                        onStatus("Gemini Live فعال است؛ صحبت کن")
                     }
-                    val content=root.optJSONObject("serverContent")
-                    content?.optJSONObject("inputTranscription")?.optString("text")?.takeIf{it.isNotBlank()}?.let { onText("شما: $it") }
-                    content?.optJSONObject("outputTranscription")?.optString("text")?.takeIf{it.isNotBlank()}?.let { onText("رُوبُو: $it") }
-                    val parts=content?.optJSONObject("modelTurn")?.optJSONArray("parts")
-                    if(parts!=null) for(i in 0 until parts.length()) {
-                        val part=parts.optJSONObject(i) ?: continue
-                        val inline=part.optJSONObject("inlineData")
-                        val b64=inline?.optString("data")
-                        if(!b64.isNullOrBlank()) play(Base64.decode(b64, Base64.DEFAULT))
+                    if (root.has("error")) {
+                        val error = root.optJSONObject("error")?.optString("message") ?: "خطای ناشناخته"
+                        onStatus("خطای Gemini Live: $error")
                     }
-                } catch(e:Exception) { onStatus("خواندن پاسخ Live: ${e.message}") }
+
+                    val toolCall = root.optJSONObject("toolCall")
+                    val calls = toolCall?.optJSONArray("functionCalls")
+                    if (calls != null) {
+                        for (i in 0 until calls.length()) {
+                            val call = calls.optJSONObject(i) ?: continue
+                            onToolCall(
+                                call.optString("id"),
+                                call.optString("name"),
+                                call.optJSONObject("args") ?: JSONObject()
+                            )
+                        }
+                    }
+
+                    val content = root.optJSONObject("serverContent")
+                    content?.optJSONObject("inputTranscription")?.optString("text")
+                        ?.takeIf { it.isNotBlank() }?.let { onText("شما: $it") }
+                    content?.optJSONObject("outputTranscription")?.optString("text")
+                        ?.takeIf { it.isNotBlank() }?.let { onText("رُوبُو: $it") }
+
+                    val parts = content?.optJSONObject("modelTurn")?.optJSONArray("parts")
+                    if (parts != null) {
+                        for (i in 0 until parts.length()) {
+                            val part = parts.optJSONObject(i) ?: continue
+                            val inlineData = part.optJSONObject("inlineData") ?: continue
+                            val base64 = inlineData.optString("data")
+                            if (base64.isNotBlank()) {
+                                val bytes = Base64.decode(base64, Base64.DEFAULT)
+                                if (bytes.isNotEmpty() && audioRunning.get()) playbackQueue.offer(bytes)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    onStatus("خواندن پیام Gemini ناموفق بود: ${e.message ?: "خطا"}")
+                }
             }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                connected.set(false); stopAudio(); onStatus("اتصال Gemini Live ناموفق: ${t.message}")
+                connected.set(false)
+                stopAudio()
+                val detail = response?.let { "HTTP ${it.code}" } ?: (t.message ?: "اتصال ناموفق")
+                onStatus("اتصال Gemini Live ناموفق: $detail")
             }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                connected.set(false); stopAudio(); onStatus("Gemini Live قطع شد")
+                connected.set(false)
+                stopAudio()
+                onStatus("Gemini Live قطع شد")
             }
         })
     }
 
-    fun sendText(text: String) {
-        if(!connected.get()) { onStatus("Gemini Live هنوز آماده نیست"); return }
-        socket?.send(JSONObject().put("realtimeInput", JSONObject().put("text", text)).toString())
-    }
-
     fun sendToolResponse(id: String, name: String, result: JSONObject) {
+        if (!connected.get()) return
         val response = JSONObject().put("id", id).put("name", name).put("response", result)
-        socket?.send(JSONObject().put("toolResponse", JSONObject().put("functionResponses", JSONArray().put(response))).toString())
+        val message = JSONObject().put("toolResponse", JSONObject().put("functionResponses", JSONArray().put(response)))
+        socket?.send(message.toString())
     }
 
     private fun startAudio() {
-        if(!running.compareAndSet(false,true)) return
+        if (!audioRunning.compareAndSet(false, true)) return
         try {
-            val minIn=AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(4096)
-            recorder=AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,16000,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT,minIn*2)
-            val minOut=AudioTrack.getMinBufferSize(24000,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(4096)
-            player=AudioTrack(AudioManager.STREAM_MUSIC,24000,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_16BIT,minOut*2,AudioTrack.MODE_STREAM)
-            player?.play(); recorder?.startRecording()
-            recordThread=Thread {
-                val buffer=ByteArray(2048)
-                while(running.get()) {
+            val minInput = AudioRecord.getMinBufferSize(
+                INPUT_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(4096)
+            val newRecorder = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                INPUT_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                minInput * 2
+            )
+            check(newRecorder.state == AudioRecord.STATE_INITIALIZED) { "راه‌اندازی میکروفون انجام نشد" }
+
+            val minOutput = AudioTrack.getMinBufferSize(
+                OUTPUT_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(4096)
+            val newPlayer = AudioTrack(
+                AudioManager.STREAM_MUSIC,
+                OUTPUT_RATE,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                minOutput * 2,
+                AudioTrack.MODE_STREAM
+            )
+            check(newPlayer.state == AudioTrack.STATE_INITIALIZED) { "راه‌اندازی پخش صدا انجام نشد" }
+
+            recorder = newRecorder
+            player = newPlayer
+            playbackQueue.clear()
+            newPlayer.play()
+            newRecorder.startRecording()
+
+            playbackThread = Thread {
+                while (audioRunning.get()) {
                     try {
-                        val n=recorder?.read(buffer,0,buffer.size) ?: -1
-                        if(n>0 && connected.get()) {
-                            val bytes=buffer.copyOf(n)
-                            val audio=JSONObject().put("data",Base64.encodeToString(bytes,Base64.NO_WRAP)).put("mimeType","audio/pcm;rate=16000")
-                            socket?.send(JSONObject().put("realtimeInput",JSONObject().put("audio",audio)).toString())
+                        val chunk = playbackQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                        val track = player ?: break
+                        var offset = 0
+                        while (offset < chunk.size && audioRunning.get()) {
+                            val written = track.write(chunk, offset, chunk.size - offset)
+                            if (written <= 0) break
+                            offset += written
                         }
-                    } catch(_:Exception) { break }
+                    } catch (_: InterruptedException) {
+                        break
+                    } catch (_: Exception) {
+                        if (audioRunning.get()) onStatus("پخش صدای رُوبُو دچار خطا شد")
+                    }
                 }
-            }.apply { name="RoboLiveMic"; start() }
-        } catch(e:Exception) { running.set(false); onStatus("راه‌اندازی میکروفون/صدا ناموفق: ${e.message}") }
+            }.apply { name = "RoboAudioPlayback"; start() }
+
+            recordThread = Thread {
+                val buffer = ByteArray(2048)
+                while (audioRunning.get() && connected.get()) {
+                    try {
+                        val count = recorder?.read(buffer, 0, buffer.size) ?: -1
+                        if (count > 0 && connected.get()) {
+                            val payload = JSONObject()
+                                .put("data", Base64.encodeToString(buffer.copyOf(count), Base64.NO_WRAP))
+                                .put("mimeType", "audio/pcm;rate=$INPUT_RATE")
+                            val message = JSONObject().put("realtimeInput", JSONObject().put("audio", payload))
+                            socket?.send(message.toString())
+                        } else if (count < 0) {
+                            onStatus("خواندن میکروفون ناموفق بود")
+                            break
+                        }
+                    } catch (_: Exception) {
+                        if (audioRunning.get()) onStatus("ارسال صدا به Gemini ناموفق بود")
+                        break
+                    }
+                }
+            }.apply { name = "RoboLiveMicrophone"; start() }
+        } catch (e: Exception) {
+            audioRunning.set(false)
+            connected.set(false)
+            releaseAudioObjects()
+            socket?.close(1011, "Audio startup failed")
+            onStatus("راه‌اندازی صدا ناموفق: ${e.message ?: "خطا"}")
+        }
     }
 
-    @Synchronized private fun play(bytes: ByteArray) {
-        try { if(running.get() && bytes.isNotEmpty()) player?.write(bytes,0,bytes.size) } catch(_:Exception) {}
-    }
     private fun stopAudio() {
-        running.set(false)
-        try { recorder?.stop() } catch(_:Exception) {}
-        try { recorder?.release() } catch(_:Exception) {}
-        recorder=null
-        try { player?.pause(); player?.flush(); player?.stop(); player?.release() } catch(_:Exception) {}
-        player=null
+        audioRunning.set(false)
+        recordThread?.interrupt()
+        playbackThread?.interrupt()
+        recordThread = null
+        playbackThread = null
+        playbackQueue.clear()
+        releaseAudioObjects()
     }
-    fun close() { connected.set(false); stopAudio(); socket?.close(1000,"user closed"); socket=null }
+
+    private fun releaseAudioObjects() {
+        try { recorder?.let { if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) it.stop() } } catch (_: Exception) { }
+        try { recorder?.release() } catch (_: Exception) { }
+        recorder = null
+        try { player?.pause(); player?.flush(); player?.stop(); player?.release() } catch (_: Exception) { }
+        player = null
+    }
+
+    fun close() {
+        connected.set(false)
+        stopAudio()
+        socket?.close(1000, "User closed session")
+        socket = null
+    }
 
     private fun toolDeclarations(): JSONArray {
-        fun tool(name:String, description:String, props:JSONObject=JSONObject(), required:JSONArray=JSONArray()) = JSONObject()
-            .put("name",name).put("description",description).put("parameters",JSONObject().put("type","OBJECT").put("properties",props).put("required",required))
-        fun prop(type:String, description:String, enum:JSONArray?=null):JSONObject = JSONObject().put("type",type).put("description",description).also { if(enum!=null) it.put("enum",enum) }
+        fun property(type: String, description: String, enum: JSONArray? = null): JSONObject =
+            JSONObject().put("type", type).put("description", description).also {
+                if (enum != null) it.put("enum", enum)
+            }
+        fun declaration(name: String, description: String, properties: JSONObject, required: JSONArray): JSONObject =
+            JSONObject().put("name", name).put("description", description).put(
+                "parameters",
+                JSONObject().put("type", "OBJECT").put("properties", properties).put("required", required)
+            )
+
+        val moveProperties = JSONObject()
+            .put("direction", property(
+                "STRING", "جهت حرکت ربات",
+                JSONArray().put("forward").put("backward").put("left").put("right")
+            ))
+            .put("duration", property("NUMBER", "مدت حرکت بر حسب ثانیه؛ بین 0.1 تا 5"))
+
         return JSONArray()
-            .put(tool("move_robot","حرکت واقعی رُوبُو؛ فقط با درخواست روشن کاربر، حداکثر ۵ ثانیه.",JSONObject().put("direction",prop("STRING","جهت حرکت",JSONArray().put("forward").put("backward").put("left").put("right"))).put("duration",prop("NUMBER","مدت ثانیه از 0.1 تا 5")),JSONArray().put("direction")))
-            .put(tool("stop_robot","توقف فوری موتورها"))
-            .put(tool("list_project_files","فهرست فایل‌های پروژه"))
-            .put(tool("read_project_file","خواندن فایل متنی پروژه",JSONObject().put("path",prop("STRING","مسیر نسبی فایل")),JSONArray().put("path")))
-            .put(tool("search_project_code","جست‌وجوی متن در فایل‌های پروژه",JSONObject().put("query",prop("STRING","عبارت جست‌وجو")),JSONArray().put("query")))
-            .put(tool("check_python_syntax","بررسی ابتدایی ساختار فایل Python؛ بررسی کامل AST روی Android در دسترس نیست",JSONObject().put("path",prop("STRING","مسیر نسبی اختیاری فایل Python"))))
-            .put(tool("propose_file_change","پیشنهاد تغییر فایل؛ برنامه پیش از اعمال از کاربر تأیید می‌گیرد",JSONObject().put("path",prop("STRING","مسیر نسبی فایل")).put("summary",prop("STRING","خلاصه تغییر")).put("content",prop("STRING","محتوای کامل فایل پیشنهادی")),JSONArray().put("path").put("summary").put("content")))
-            .put(tool("propose_file_delete","پیشنهاد حذف فایل؛ نیازمند تأیید کاربر",JSONObject().put("path",prop("STRING","مسیر نسبی فایل")).put("summary",prop("STRING","دلیل حذف")),JSONArray().put("path").put("summary")))
+            .put(declaration(
+                "move_robot",
+                "حرکت فیزیکی ربات فقط وقتی کاربر به‌وضوح حرکت می‌خواهد؛ مدت حداکثر 5 ثانیه باشد.",
+                moveProperties,
+                JSONArray().put("direction")
+            ))
+            .put(declaration(
+                "stop_robot",
+                "توقف فوری ربات وقتی کاربر می‌گوید بایست، وایستا یا توقف.",
+                JSONObject(),
+                JSONArray()
+            ))
     }
 }
